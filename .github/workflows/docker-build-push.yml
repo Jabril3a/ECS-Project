@@ -12,9 +12,15 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: ecs-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - uses: actions/checkout@v4
 
@@ -38,17 +44,25 @@ jobs:
           docker push $ECR_REGISTRY/ecs-project:latest
 
       - name: Run Trivy scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@68b488a75bdf7fe1ef4c104a8b33221b42c3bf9c  # chore(deps): Update trivy to v0.71.0 (#571)
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/ecs-project:${{ github.sha }}
           format: table
           exit-code: 0
 
       - name: Update ECS task definition and deploy
+        id: deploy
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
+          PREVIOUS_TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster ecs-project-cluster \
+            --services ecs_project_service \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          echo "previous_task_def=$PREVIOUS_TASK_DEF_ARN" >> "$GITHUB_OUTPUT"
+
           TASK_DEF=$(aws ecs describe-task-definition \
             --task-definition ecs-project-task \
             --query taskDefinition \
@@ -58,8 +72,8 @@ jobs:
 
           NEW_TASK_DEF=$(echo $TASK_DEF | jq \
             --arg IMAGE "$NEW_IMAGE" \
-            '.containerDefinitions[0].image = $IMAGE | 
-            del(.taskDefinitionArn, .revision, .status, .requiresAttributes, 
+            '.containerDefinitions[0].image = $IMAGE |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .placementConstraints, .compatibilities, .registeredAt, .registeredBy)')
 
           NEW_REVISION=$(aws ecs register-task-definition \
@@ -82,3 +96,12 @@ jobs:
       - name: Health check
         run: |
           curl --fail https://ecs.jabz.uk/health
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          aws ecs update-service \
+            --cluster ecs-project-cluster \
+            --service ecs_project_service \
+            --task-definition ${{ steps.deploy.outputs.previous_task_def }} \
+            --force-new-deployment
