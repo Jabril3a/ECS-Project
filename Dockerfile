@@ -18,7 +18,7 @@ COPY --from=builder /app/server /server
 
 # EXPOSE 80
 
-USER USER 65534:65534
+USER 65534:65534
 
 ENTRYPOINT ["/server"]
 
